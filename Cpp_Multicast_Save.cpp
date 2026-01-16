@@ -14,6 +14,7 @@
 
 #include "stdafx.h"
 #include "ArenaApi.h"
+#include "SaveApi.h"
 #include <chrono>
 #include <ctime>
 #include <cstring>
@@ -44,6 +45,9 @@
 // image timeout
 #define TIMEOUT 2000
 
+// pixel format
+#define PIXEL_FORMAT BGR8
+
 // Length of time to grab images (sec)
 //    Note that the listener must be started while the master is still streaming,
 //    and that the listener will not receive any more images once the master
@@ -54,6 +58,7 @@
 // =- OUTPUT DIRECTORY HELPER
 // =-=-=-=-=-=-=-=-=-=-=-=-=-
 
+// Resolve the directory of the running executable (Linux /proc/self/exe).
 static std::string GetExecutableDir()
 {
 	char exePath[PATH_MAX];
@@ -72,6 +77,7 @@ static std::string GetExecutableDir()
 	return fullPath.substr(0, lastSlash);
 }
 
+// Format program start time for folder naming.
 static std::string GetRunTimestamp()
 {
 	std::time_t now = std::time(NULL);
@@ -83,6 +89,7 @@ static std::string GetRunTimestamp()
 	return std::string(buffer);
 }
 
+// Create directories recursively for a path.
 static bool EnsureDir(const std::string& path)
 {
 	if (path.empty())
@@ -114,6 +121,7 @@ static bool EnsureDir(const std::string& path)
 	return true;
 }
 
+// Create the output directory under the executable directory.
 static std::string CreateOutputDir()
 {
 	std::string outputDir = GetExecutableDir() + "/imgs/" + GetRunTimestamp();
@@ -133,7 +141,64 @@ static std::string CreateOutputDir()
 // (1) enable multicast
 // (2) prepare settings on master, not on listener
 // (3) stream regularly
-void AcquireImages(Arena::IDevice* pDevice)
+
+// demonstrates saving an image
+// (1) converts image to a displayable pixel format
+// (2) prepares image parameters
+// (3) prepares image writer
+// (4) saves image
+// (5) destroys converted image
+void SaveImage(Arena::IImage* pImage, const char* filename)
+{
+
+	// Convert image
+	//    Convert the image to a displayable pixel format. It is worth keeping in
+	//    mind the best pixel and file formats for your application. This example
+	//    converts the image so that it is displayable by the operating system.
+	std::cout << TAB1 << "Convert image to " << GetPixelFormatName(PIXEL_FORMAT) << "\n";
+
+	auto pConverted = Arena::ImageFactory::Convert(
+		pImage,
+		PIXEL_FORMAT);
+
+	// Prepare image parameters
+	//    An image's width, height, and bits per pixel are required to save to
+	//    disk. Its size and stride (i.e. pitch) can be calculated from those 3
+	//    inputs. Notice that an image's size and stride use bytes as a unit
+	//    while the bits per pixel uses bits.
+	std::cout << TAB1 << "Prepare image parameters\n";
+
+	Save::ImageParams params(
+		pConverted->GetWidth(),
+		pConverted->GetHeight(),
+		pConverted->GetBitsPerPixel());
+
+	// Prepare image writer
+	//    The image writer requires 3 arguments to save an image: the image's
+	//    parameters, a specified file name or pattern, and the image data to
+	//    save. Providing these should result in a successfully saved file on the
+	//    disk. Because an image's parameters and file name pattern may repeat,
+	//    they can be passed into the image writer's constructor.
+	std::cout << TAB1 << "Prepare image writer\n";
+
+	Save::ImageWriter writer(
+		params,
+		filename);
+
+	// Save image
+	//    Passing image data into the image writer using the cascading I/O
+	//    operator (<<) triggers a save. Notice that the << operator accepts the
+	//    image data as a constant unsigned 8-bit integer pointer (const
+	//    uint8_t*) and the file name as a character string (const char*).
+	std::cout << TAB1 << "Save image\n";
+
+	writer << pConverted->GetData();
+
+	// destroy converted image
+	Arena::ImageFactory::Destroy(pConverted);
+}
+
+void AcquireImages(Arena::IDevice* pDevice, const std::string& outputDir)
 {
 	// get node values that will be changed in order to return their values at
 	// the end of the example
@@ -191,6 +256,7 @@ void AcquireImages(Arena::IDevice* pDevice)
 	// define image count to detect if all images are not received
 	int imageCount = 0;
 	int unreceivedImageCount = 0;
+	bool imageSaved = false;
 
 	// get images
 	std::cout << TAB1 << "Getting images for " << NUM_SECONDS << " seconds\n";
@@ -228,6 +294,15 @@ void AcquireImages(Arena::IDevice* pDevice)
 		uint64_t timestampNs = pImage->GetTimestampNs();
 
 		std::cout << " (frame ID " << frameId << "; timestamp (ns): " << timestampNs << ")";
+
+		// Save only the first received frame for this step.
+		if (!imageSaved)
+		{
+			std::ostringstream filename;
+			filename << outputDir << "/" << timestampNs << "-" << frameId << ".png";
+			SaveImage(pImage, filename.str().c_str());
+			imageSaved = true;
+		}
 
 		// requeue buffer
 		std::cout << " and requeue\n";
@@ -322,7 +397,7 @@ int main()
 
 		// run example
 		std::cout << "Commence example\n\n";
-		AcquireImages(pDevice);
+		AcquireImages(pDevice, outputDir);
 		std::cout << "\nExample complete\n";
 
 		// clean up example
