@@ -16,14 +16,18 @@
 #include "ArenaApi.h"
 #include "SaveApi.h"
 #include <chrono>
+#include <condition_variable>
 #include <ctime>
 #include <cstring>
+#include <deque>
 #include <errno.h>
 #include <iomanip>
 #include <limits.h>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -135,9 +139,101 @@ static std::string CreateOutputDir()
 	return outputDir;
 }
 
+// =-=-=-=-=-=-=-=-=-=-=-=-=-=-
+// =- ASYNC SAVE QUEUE HELPERS
+// =-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+struct SaveJob
+{
+	// Image copy to be saved and destroyed by the worker.
+	Arena::IImage* pImage;
+	std::string filename;
+};
+
+struct SaveQueue
+{
+	// Single-producer/single-consumer queue for disk writes.
+	std::deque<SaveJob> jobs;
+	std::mutex mutex;
+	std::condition_variable cv;
+	bool stop;
+};
+
+void SaveImage(Arena::IImage* pImage, const char* filename);
+
+static void SaveWorker(SaveQueue* queue)
+{
+	// Drain save jobs on a background thread to avoid blocking acquisition.
+	for (;;)
+	{
+		SaveJob job;
+		{
+			std::unique_lock<std::mutex> lock(queue->mutex);
+			queue->cv.wait(lock, [&]() { return queue->stop || !queue->jobs.empty(); });
+			if (queue->stop && queue->jobs.empty())
+				break;
+
+			job = queue->jobs.front();
+			queue->jobs.pop_front();
+		}
+
+		try
+		{
+			SaveImage(job.pImage, job.filename.c_str());
+		}
+		catch (GenICam::GenericException& ge)
+		{
+			std::cout << "\nGenICam exception thrown while saving: " << ge.what() << "\n";
+		}
+		catch (std::exception& ex)
+		{
+			std::cout << "\nStandard exception thrown while saving: " << ex.what() << "\n";
+		}
+		catch (...)
+		{
+			std::cout << "\nUnexpected exception thrown while saving\n";
+		}
+
+		Arena::ImageFactory::Destroy(job.pImage);
+	}
+}
+
+static void EnqueueSave(SaveQueue* queue, SaveJob job)
+{
+	{
+		std::lock_guard<std::mutex> lock(queue->mutex);
+		queue->jobs.push_back(job);
+	}
+	queue->cv.notify_one();
+}
+
+static void StopSaveWorker(SaveQueue* queue, std::thread& worker)
+{
+	// Signal the worker to flush and exit.
+	{
+		std::lock_guard<std::mutex> lock(queue->mutex);
+		queue->stop = true;
+	}
+	queue->cv.notify_all();
+	if (worker.joinable())
+		worker.join();
+}
+
+struct SaveWorkerGuard
+{
+	SaveQueue* queue;
+	std::thread* worker;
+	~SaveWorkerGuard()
+	{
+		// Ensure pending saves are flushed before returning.
+		if (worker && worker->joinable())
+			StopSaveWorker(queue, *worker);
+	}
+};
+
 // =-=-=-=-=-=-=-=-=-
 // =-=- EXAMPLE -=-=-
-// =-=-=-=-=-=-=-=-=-
+// =-=-=-=-=-=-=-=-=- 
 // (1) enable multicast
 // (2) prepare settings on master, not on listener
 // (3) stream regularly
@@ -253,6 +349,11 @@ void AcquireImages(Arena::IDevice* pDevice, const std::string& outputDir)
 
 	pDevice->StartStream();
 
+	SaveQueue saveQueue;
+	saveQueue.stop = false;
+	std::thread saveThread(SaveWorker, &saveQueue);
+	SaveWorkerGuard saveGuard = { &saveQueue, &saveThread };
+
 	// define image count to detect if all images are not received
 	int imageCount = 0;
 	int unreceivedImageCount = 0;
@@ -300,7 +401,11 @@ void AcquireImages(Arena::IDevice* pDevice, const std::string& outputDir)
 		{
 			std::ostringstream filename;
 			filename << outputDir << "/" << timestampNs << "-" << frameId << ".png";
-			SaveImage(pImage, filename.str().c_str());
+			SaveJob job;
+			// Copy image data so the buffer can be requeued immediately.
+			job.pImage = Arena::ImageFactory::Copy(pImage);
+			job.filename = filename.str();
+			EnqueueSave(&saveQueue, job);
 			savedImageCount++;
 			std::cout << " - saved: " << filename.str();
 		}

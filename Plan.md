@@ -33,11 +33,16 @@
    - When printing frame info, append the saved filename (e.g. `std::cout << " (frame ID " << frameId << "; timestamp (ns): " << timestampNs << ") - saved: " << filename;`).
    - Save only first 10 received frames; after 10, continue to requeue without saving.
    - Listener: exit loop immediately after saving 10 frames.
-5) Add ESC key handling for master and listener.
+5) Add async save queue to reduce drops.
+   - After GetImage, copy image data (ImageFactory::Copy or Convert) and requeue immediately.
+   - Push copy + filename into a worker queue for disk write.
+   - Writer thread handles Save::ImageWriter and file I/O.
+   - Ensure graceful shutdown: flush queue before exit.
+6) Add ESC key handling for master and listener.
    - Use non-blocking stdin (termios + fcntl) to detect ESC (27) without stopping acquisition.
    - Listener: exit after saving 10 frames or if ESC is pressed before that.
    - Restore terminal settings on exit (RAII helper or explicit cleanup).
-6) Cleanup and restore.
+7) Cleanup and restore.
    - Requeue buffers on every successful GetImage.
    - StopStream after loop; restore AcquisitionMode for master.
    - Keep existing exception handling and teardown from Cpp_Multicast.
@@ -55,7 +60,10 @@
 4) Full save loop behavior
    - Save first 10 frames, print filename in the log, then follow master/listener exit rules.
    - Test: listener exits after 10 saves; master continues streaming after 10 saves.
-5) ESC handling for master and listener
+5) Async save queue
+   - Add worker thread + queue; verify buffer requeue happens before disk write.
+   - Test: drop rate improves during saving (frame IDs should be closer to continuous).
+6) ESC handling for master and listener
    - Add non-blocking ESC detection and terminal cleanup.
    - Test: press ESC during streaming to exit early; confirm listener exits on ESC or after 10 saves, and master exits only on ESC.
 
@@ -80,3 +88,5 @@
 - Saved files appear under imgs/<run_timestamp>/ with names based on timestampNs.
 - Master keeps streaming after 10 saves until ESC.
 - Listener exits after 10 saves.
+- Frame ID gaps reduced during saving after async queue is enabled.
+- Async save validation: contiguous frame IDs and ~33.43 FPS (avg gap 29,914,885 ns).
