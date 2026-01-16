@@ -21,12 +21,14 @@
 #include <cstring>
 #include <deque>
 #include <errno.h>
+#include <fcntl.h>
 #include <iomanip>
 #include <limits.h>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <termios.h>
 #include <thread>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -56,6 +58,7 @@
 //    Note that the listener must be started while the master is still streaming,
 //    and that the listener will not receive any more images once the master
 //    stops streaming.
+//    Retained from the original example; loop now exits on ESC.
 #define NUM_SECONDS 20
 
 // =-=-=-=-=-=-=-=-=-=-=-=-=-
@@ -231,6 +234,80 @@ struct SaveWorkerGuard
 	}
 };
 
+struct TerminalSettings
+{
+	// Terminal state for non-blocking ESC detection.
+	bool enabled;
+	termios originalTermios;
+	int originalFlags;
+};
+
+static TerminalSettings SetupTerminalForEsc()
+{
+	// Put stdin into non-canonical, non-echo, non-blocking mode.
+	TerminalSettings settings = {};
+	settings.enabled = false;
+	settings.originalFlags = -1;
+
+	if (!isatty(STDIN_FILENO))
+		return settings;
+
+	if (tcgetattr(STDIN_FILENO, &settings.originalTermios) != 0)
+		return settings;
+
+	termios raw = settings.originalTermios;
+	raw.c_lflag &= ~(ICANON | ECHO);
+	raw.c_cc[VMIN] = 0;
+	raw.c_cc[VTIME] = 0;
+	if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) != 0)
+		return settings;
+
+	settings.originalFlags = fcntl(STDIN_FILENO, F_GETFL, 0);
+	if (settings.originalFlags != -1)
+		fcntl(STDIN_FILENO, F_SETFL, settings.originalFlags | O_NONBLOCK);
+
+	settings.enabled = true;
+	return settings;
+}
+
+static void RestoreTerminal(const TerminalSettings& settings)
+{
+	// Restore terminal settings if they were changed.
+	if (!settings.enabled)
+		return;
+
+	tcsetattr(STDIN_FILENO, TCSANOW, &settings.originalTermios);
+	if (settings.originalFlags != -1)
+		fcntl(STDIN_FILENO, F_SETFL, settings.originalFlags);
+}
+
+struct TerminalGuard
+{
+	// RAII restore for terminal settings.
+	TerminalSettings settings;
+	~TerminalGuard()
+	{
+		RestoreTerminal(settings);
+	}
+};
+
+static bool CheckForEsc(const TerminalSettings& settings)
+{
+	// Consume all pending input; return true if ESC (27) is seen.
+	if (!settings.enabled)
+		return false;
+
+	char ch = 0;
+	ssize_t bytesRead = read(STDIN_FILENO, &ch, 1);
+	while (bytesRead > 0)
+	{
+		if (ch == 27)
+			return true;
+		bytesRead = read(STDIN_FILENO, &ch, 1);
+	}
+	return false;
+}
+
 // =-=-=-=-=-=-=-=-=-
 // =-=- EXAMPLE -=-=-
 // =-=-=-=-=-=-=-=-=- 
@@ -354,6 +431,8 @@ void AcquireImages(Arena::IDevice* pDevice, const std::string& outputDir)
 	std::thread saveThread(SaveWorker, &saveQueue);
 	SaveWorkerGuard saveGuard = { &saveQueue, &saveThread };
 
+	TerminalGuard terminalGuard = { SetupTerminalForEsc() };
+
 	// define image count to detect if all images are not received
 	int imageCount = 0;
 	int unreceivedImageCount = 0;
@@ -361,19 +440,17 @@ void AcquireImages(Arena::IDevice* pDevice, const std::string& outputDir)
 	bool isMaster = (deviceAccessStatus == "ReadWrite");
 
 	// get images
-	std::cout << TAB1 << "Getting images for " << NUM_SECONDS << " seconds\n";
+	if (isMaster)
+		std::cout << TAB1 << "Getting images until ESC\n";
+	else
+		std::cout << TAB1 << "Getting images until 10 saves or ESC\n";
 
 	Arena::IImage* pImage = NULL;
 
-	// define start and latest time for timed image acquisition
-	auto startTime = std::chrono::steady_clock::now();
-	auto latestTime = std::chrono::steady_clock::now();
+	bool escPressed = false;
 
-	while (std::chrono::duration_cast<std::chrono::seconds>(latestTime - startTime).count() < NUM_SECONDS)
+	while (true)
 	{
-		// update time
-		latestTime = std::chrono::steady_clock::now();		
-
 		// get image
 		imageCount++;
 		try
@@ -384,6 +461,11 @@ void AcquireImages(Arena::IDevice* pDevice, const std::string& outputDir)
 		{
 			std::cout << TAB2 << "No image received\n";
 			unreceivedImageCount++;
+			if (CheckForEsc(terminalGuard.settings))
+			{
+				escPressed = true;
+				break;
+			}
 			continue;
 		}
 
@@ -413,6 +495,12 @@ void AcquireImages(Arena::IDevice* pDevice, const std::string& outputDir)
 		// requeue buffer
 		std::cout << " and requeue\n";
 		pDevice->RequeueBuffer(pImage);
+
+		if (CheckForEsc(terminalGuard.settings))
+			escPressed = true;
+
+		if (escPressed)
+			break;
 
 		if (!isMaster && savedImageCount >= 10)
 			break;
