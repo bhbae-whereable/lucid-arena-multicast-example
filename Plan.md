@@ -4,7 +4,7 @@
 - Add a new example at Examples/Arena/Cpp_Multicast_Save/Cpp_Multicast_Save.cpp.
 - Base multicast flow on Cpp_Multicast and keep its comments where possible.
 - Reuse SaveApi usage and comments from Cpp_Save for per-frame image saving.
-- No CLI options; behavior is fixed in code.
+- Interface name is provided via argv (e.g. `eno1`); group IP remains constant in code.
 - Master: save first 10 frames only, then continue streaming until ESC is pressed.
 - Listener: save first 10 frames, then stop and exit.
 - Save path: {executable dir}/imgs/{program start time}/{timestampNs}-{frameId}.png.
@@ -38,11 +38,15 @@
    - Push copy + filename into a worker queue for disk write.
    - Writer thread handles Save::ImageWriter and file I/O.
    - Ensure graceful shutdown: flush queue before exit.
-6) Add ESC key handling for master and listener.
+6) Add multicast join/leave in code.
+   - Use a UDP socket with `IP_ADD_MEMBERSHIP`/`IP_DROP_MEMBERSHIP`.
+   - Accept interface name via argv; resolve to ifindex for membership.
+   - Join before streaming; leave on shutdown.
+7) Add ESC key handling for master and listener.
    - Use non-blocking stdin (termios + fcntl) to detect ESC (27) without stopping acquisition.
    - Listener: exit after saving 10 frames or if ESC is pressed before that.
    - Restore terminal settings on exit (RAII helper or explicit cleanup).
-7) Cleanup and restore.
+8) Cleanup and restore.
    - Requeue buffers on every successful GetImage.
    - StopStream after loop; restore AcquisitionMode for master.
    - Keep existing exception handling and teardown from Cpp_Multicast.
@@ -63,7 +67,9 @@
 5) Async save queue
    - Add worker thread + queue; verify buffer requeue happens before disk write.
    - Test: drop rate improves during saving (frame IDs should be closer to continuous).
-6) ESC handling for master and listener
+6) Multicast join/leave via socket
+   - Join on startup, leave on shutdown; verify no `ip addr add ... autojoin` needed.
+7) ESC handling for master and listener
    - Add non-blocking ESC detection and terminal cleanup.
    - Test: press ESC during streaming to exit early; confirm listener exits on ESC or after 10 saves, and master exits only on ESC.
 

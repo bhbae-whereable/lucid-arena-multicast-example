@@ -7,6 +7,7 @@ Multicast acquisition example based on Arena SDK samples. Saves the first 10 fra
 - Listener (ReadOnly): does not change device settings; exits after 10 saves or ESC.
 - Output path: `{exe_dir}/imgs/{run_timestamp}/{timestampNs}-{frameId}.png`.
 - Buffers are requeued immediately after copying to reduce drops.
+- Multicast group join/leave is performed in code (no `ip addr add ... autojoin`).
 
 ## Requirements
 - Arena SDK installed (headers, libs, and examples tree).
@@ -35,10 +36,11 @@ make
 
 ## Run
 ```
-./Cpp_Multicast_Save
+./Cpp_Multicast_Save eno1
 ```
 
 ## Notes
 - Press ESC to stop; requires a TTY.
+- Pass the interface name (e.g. `eno1`) as the first argument.
 - If you clone this repo outside the SDK tree, update the include/lib paths in `makefile` or adjust the folder location.
 - Runtime outputs (images, binaries, objects) are ignored via `.gitignore`.

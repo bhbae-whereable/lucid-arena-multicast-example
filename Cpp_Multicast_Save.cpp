@@ -15,6 +15,7 @@
 #include "stdafx.h"
 #include "ArenaApi.h"
 #include "SaveApi.h"
+#include <arpa/inet.h>
 #include <chrono>
 #include <condition_variable>
 #include <ctime>
@@ -25,11 +26,14 @@
 #include <iomanip>
 #include <limits.h>
 #include <mutex>
+#include <net/if.h>
+#include <netinet/in.h>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <termios.h>
 #include <thread>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -53,6 +57,9 @@
 
 // pixel format
 #define PIXEL_FORMAT BGR8
+
+// multicast group IP (fixed)
+#define MULTICAST_GROUP_IP "239.10.10.10"
 
 // Length of time to grab images (sec)
 //    Note that the listener must be started while the master is still streaming,
@@ -307,6 +314,50 @@ static bool CheckForEsc(const TerminalSettings& settings)
 	}
 	return false;
 }
+
+struct MulticastGuard
+{
+	int socketFd;
+	ip_mreqn request;
+	bool joined;
+
+	MulticastGuard()
+		: socketFd(-1)
+		, joined(false)
+	{
+		std::memset(&request, 0, sizeof(request));
+	}
+
+	~MulticastGuard()
+	{
+		if (joined)
+			setsockopt(socketFd, IPPROTO_IP, IP_DROP_MEMBERSHIP, &request, sizeof(request));
+		if (socketFd != -1)
+			close(socketFd);
+	}
+
+	void Join(const char* interfaceName)
+	{
+		socketFd = socket(AF_INET, SOCK_DGRAM, 0);
+		if (socketFd < 0)
+			throw std::runtime_error(std::string("Failed to create socket: ") + std::strerror(errno));
+
+		unsigned int ifIndex = if_nametoindex(interfaceName);
+		if (ifIndex == 0)
+			throw std::runtime_error(std::string("Invalid interface name: ") + interfaceName);
+
+		if (inet_pton(AF_INET, MULTICAST_GROUP_IP, &request.imr_multiaddr) != 1)
+			throw std::runtime_error("Invalid multicast group IP");
+
+		request.imr_ifindex = static_cast<int>(ifIndex);
+		request.imr_address.s_addr = htonl(INADDR_ANY);
+
+		if (setsockopt(socketFd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &request, sizeof(request)) != 0)
+			throw std::runtime_error(std::string("Failed to join multicast group: ") + std::strerror(errno));
+
+		joined = true;
+	}
+};
 
 // =-=-=-=-=-=-=-=-=-
 // =-=- EXAMPLE -=-=-
@@ -567,12 +618,21 @@ Arena::DeviceInfo SelectDevice(std::vector<Arena::DeviceInfo>& deviceInfos)
 	return deviceInfos[selection - 1];
 }
 
-int main()
+int main(int argc, char** argv)
 {
 	// flag to track when an exception has been thrown
 	bool exceptionThrown = false;
 
 	std::cout << "Cpp_Multicast_Save";
+
+	if (argc < 2)
+	{
+		std::cout << "\nUsage: " << argv[0] << " <interface>\n";
+		std::cout << "Example: " << argv[0] << " eno1\n";
+		return 0;
+	}
+
+	const char* interfaceName = argv[1];
 
 	try
 	{
@@ -591,6 +651,10 @@ int main()
 
 		std::string outputDir = CreateOutputDir();
 		std::cout << TAB1 << "Output directory: " << outputDir << "\n";
+
+		std::cout << TAB1 << "Join multicast group " << MULTICAST_GROUP_IP << " on " << interfaceName << "\n";
+		MulticastGuard multicastGuard;
+		multicastGuard.Join(interfaceName);
 
 		// run example
 		std::cout << "Commence example\n\n";
