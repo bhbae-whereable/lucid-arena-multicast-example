@@ -256,7 +256,8 @@ void AcquireImages(Arena::IDevice* pDevice, const std::string& outputDir)
 	// define image count to detect if all images are not received
 	int imageCount = 0;
 	int unreceivedImageCount = 0;
-	bool imageSaved = false;
+	int savedImageCount = 0;
+	bool isMaster = (deviceAccessStatus == "ReadWrite");
 
 	// get images
 	std::cout << TAB1 << "Getting images for " << NUM_SECONDS << " seconds\n";
@@ -295,18 +296,21 @@ void AcquireImages(Arena::IDevice* pDevice, const std::string& outputDir)
 
 		std::cout << " (frame ID " << frameId << "; timestamp (ns): " << timestampNs << ")";
 
-		// Save only the first received frame for this step.
-		if (!imageSaved)
+		if (savedImageCount < 10)
 		{
 			std::ostringstream filename;
 			filename << outputDir << "/" << timestampNs << "-" << frameId << ".png";
 			SaveImage(pImage, filename.str().c_str());
-			imageSaved = true;
+			savedImageCount++;
+			std::cout << " - saved: " << filename.str();
 		}
 
 		// requeue buffer
 		std::cout << " and requeue\n";
 		pDevice->RequeueBuffer(pImage);
+
+		if (!isMaster && savedImageCount >= 10)
+			break;
 	}
 
 	if (unreceivedImageCount == imageCount)
