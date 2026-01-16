@@ -1,0 +1,15 @@
+# build outputs
+Cpp_Multicast_Save
+*.o
+*.d
+
+# runtime outputs
+imgs/
+OutputDirectory/
+
+# platform artifacts
+*.obj
+*.exe
+*.pdb
+*.pch
+.DS_Store
